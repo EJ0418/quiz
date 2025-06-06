@@ -3,6 +3,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
+using StackExchange.Redis;
 using Swashbuckle.AspNetCore.Annotations;
 
 namespace quiz.Controllers
@@ -14,10 +15,14 @@ namespace quiz.Controllers
         private readonly RedisCacheService _redisService;
         private readonly TodoContext _todoContext;
 
-        public TodoController(RedisCacheService redisService, TodoContext todoContext)
+        private readonly IDatabase _redis;
+
+
+        public TodoController(IConnectionMultiplexer connectionMultiplexer, RedisCacheService redisService, TodoContext todoContext)
         {
             _redisService = redisService;
             _todoContext = todoContext;
+            _redis = connectionMultiplexer.GetDatabase();
         }
 
         [HttpGet("{id}")]
@@ -44,17 +49,28 @@ namespace quiz.Controllers
         [HttpPost]
         [SwaggerOperation("新增待辦事項")]
         [SwaggerResponse(201, Description = "新增成功")]
+        [SwaggerResponse(400, "data被鎖住了")]
         public async Task<IActionResult> CreateData([FromBody, SwaggerParameter("要新增的代辦事項內容")] TodoItem newItem)
         {
-            newItem.CreatedTime = DateTime.Now;
-            newItem.UpdatedTime = DateTime.Now;
-            _todoContext.Add(newItem);
-            int newItemId =  await _todoContext.SaveChangesAsync();
+            string guid = Guid.NewGuid().ToString();
+            var available = await _redis.StringSetAsync("lock_" + guid, true, TimeSpan.FromSeconds(10), When.NotExists);
+            if (available)
+            {
+                newItem.CreatedTime = DateTime.Now;
+                newItem.UpdatedTime = DateTime.Now;
+                newItem.GUID = guid;
+                _todoContext.Add(newItem);
+                int newItemId = await _todoContext.SaveChangesAsync();
 
-            var json = JsonConvert.SerializeObject(newItem);
-            await _redisService.SetAsync(newItemId.ToString(), json); // 設定 TTL = 3 秒
+                var json = JsonConvert.SerializeObject(newItem);
+                await _redisService.SetAsync(newItemId.ToString(), json); // 設定 TTL = 3 秒
+                return CreatedAtAction(nameof(GetData), new { id = newItem.Id }, newItem);
+            }
+            else
+            {
+                return BadRequest($"data:{guid}被鎖住了");
+            }
 
-            return CreatedAtAction(nameof(GetData), new { id = newItem.Id }, newItem);
         }
 
         [HttpPut]
@@ -65,18 +81,25 @@ namespace quiz.Controllers
         {
             var data = await _todoContext.Set<TodoItem>().FindAsync(updatedData.Id);
             if (data == null) return NotFound("查無此id的待辦事項");
+            var available = await _redis.StringSetAsync("lock_" + data.GUID, true, TimeSpan.FromSeconds(10), When.NotExists);
+            if (available)
+            {
+                // 更新資料
+                data.Title = updatedData.Title;
+                data.IsDone = updatedData.IsDone;
+                data.UpdatedTime = DateTime.Now;
+                await _todoContext.SaveChangesAsync();
 
-            // 更新資料
-            data.Title = updatedData.Title;
-            data.IsDone = updatedData.IsDone;
-            data.UpdatedTime = DateTime.Now;
-            await _todoContext.SaveChangesAsync();
+                // 同步更新 Redis
+                var json = JsonConvert.SerializeObject(data);
+                await _redisService.SetAsync(updatedData.Id.ToString(), json); // 重新設定 TTL = 3 秒
 
-            // 同步更新 Redis
-            var json = JsonConvert.SerializeObject(data);
-            await _redisService.SetAsync(updatedData.Id.ToString(), json); // 重新設定 TTL = 3 秒
-
-            return Ok(new { returnMsg = "更新成功", data = data });
+                return Ok(new { returnMsg = "更新成功", data = data });
+            }
+            else
+            {
+                return BadRequest("data:" + data.GUID + "被鎖住了");
+            }
         }
     }
 

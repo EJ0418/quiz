@@ -1,6 +1,6 @@
 services:
   quiz:
-    image: quiz:1.0.8
+    image: quiz:1.1.2
     container_name: quiz
     restart: always
     ports:

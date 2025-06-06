@@ -19,4 +19,7 @@ public class TodoItem
 
     [SwaggerSchema("更新時間")]
     public DateTime UpdatedTime { get; set; }
+
+    [SwaggerSchema("lock GUID")]
+    public String GUID { get; set; }
 }
