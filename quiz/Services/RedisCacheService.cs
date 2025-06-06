@@ -19,7 +19,7 @@ public class RedisCacheService
 
     public async Task SetAsync(string key, string value)
     {
-        await _redis.StringSetAsync(key, value,TimeSpan.FromSeconds(5));
+        await _redis.StringSetAsync(key, value,TimeSpan.FromSeconds(60));
     }
 
     public async Task RemoveAsync(string key)

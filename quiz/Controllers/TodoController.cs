@@ -41,7 +41,7 @@ namespace quiz.Controllers
             if (dataFromDb == null) return NotFound("查無此id的待辦事項");
 
             var json = JsonConvert.SerializeObject(dataFromDb);
-            await _redisService.SetAsync(id.ToString(), json); // 重新設定 TTL = 3 秒
+            await _redis.StringSetAsync(id.ToString(), json, TimeSpan.FromSeconds(60));
 
             return Ok(new { source = "cache missing", data = dataFromDb });
         }
@@ -52,24 +52,13 @@ namespace quiz.Controllers
         [SwaggerResponse(400, "data被鎖住了")]
         public async Task<IActionResult> CreateData([FromBody, SwaggerParameter("要新增的代辦事項內容")] TodoItem newItem)
         {
-            string guid = Guid.NewGuid().ToString();
-            var available = await _redis.StringSetAsync("lock_" + guid, true, TimeSpan.FromSeconds(10), When.NotExists);
-            if (available)
-            {
-                newItem.CreatedTime = DateTime.Now;
-                newItem.UpdatedTime = DateTime.Now;
-                newItem.GUID = guid;
-                _todoContext.Add(newItem);
-                int newItemId = await _todoContext.SaveChangesAsync();
+            newItem.CreatedTime = DateTime.Now;
+            newItem.UpdatedTime = DateTime.Now;
+            _todoContext.Add(newItem);
+            int newItemId = await _todoContext.SaveChangesAsync();
 
-                var json = JsonConvert.SerializeObject(newItem);
-                await _redisService.SetAsync(newItemId.ToString(), json); // 設定 TTL = 3 秒
-                return CreatedAtAction(nameof(GetData), new { id = newItem.Id }, newItem);
-            }
-            else
-            {
-                return BadRequest($"data:{guid}被鎖住了");
-            }
+            var json = JsonConvert.SerializeObject(newItem);
+            return CreatedAtAction(nameof(GetData), new { id = newItem.Id }, newItem);
 
         }
 
@@ -81,25 +70,21 @@ namespace quiz.Controllers
         {
             var data = await _todoContext.Set<TodoItem>().FindAsync(updatedData.Id);
             if (data == null) return NotFound("查無此id的待辦事項");
-            var available = await _redis.StringSetAsync("lock_" + data.GUID, true, TimeSpan.FromSeconds(10), When.NotExists);
-            if (available)
-            {
-                // 更新資料
-                data.Title = updatedData.Title;
-                data.IsDone = updatedData.IsDone;
-                data.UpdatedTime = DateTime.Now;
-                await _todoContext.SaveChangesAsync();
 
-                // 同步更新 Redis
-                var json = JsonConvert.SerializeObject(data);
-                await _redisService.SetAsync(updatedData.Id.ToString(), json); // 重新設定 TTL = 3 秒
-
-                return Ok(new { returnMsg = "更新成功", data = data });
-            }
-            else
+            var json = JsonConvert.SerializeObject(updatedData);
+            var isLocked = !await _redis.StringSetAsync(data.Id.ToString(), json, TimeSpan.FromSeconds(60), When.NotExists);
+            if (isLocked)
             {
                 return BadRequest("data:" + data.GUID + "被鎖住了");
             }
+
+            // 更新資料
+            data.Title = updatedData.Title;
+            data.IsDone = updatedData.IsDone;
+            data.UpdatedTime = DateTime.Now;
+            await _todoContext.SaveChangesAsync();
+
+            return Ok(new { returnMsg = "更新成功", data = data });
         }
     }
 
